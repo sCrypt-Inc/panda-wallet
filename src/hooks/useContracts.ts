@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useKeys } from "./useKeys";
-import * as bsv from "bsv";
+import { PrivateKey, Script, Transaction } from "bsv-wasm-web";
+import { useBsvWasm } from "./useBsvWasm";
 
 /** 
  * `SignatureRequest` contains required informations for a signer to sign a certain input of a transaction.
@@ -53,22 +54,12 @@ export interface SignatureResponse {
   csIdx?: number;
 }
 
-const DEFAULT_SIGHASH_TYPE = bsv.crypto.Signature.SIGHASH_ALL | bsv.crypto.Signature.SIGHASH_FORKID;
-
-const Interp = bsv.Script.Interpreter;
-const DEFAULT_FLAGS =
-  Interp.SCRIPT_ENABLE_MAGNETIC_OPCODES | Interp.SCRIPT_ENABLE_MONOLITH_OPCODES |
-  Interp.SCRIPT_VERIFY_STRICTENC |
-  Interp.SCRIPT_ENABLE_SIGHASH_FORKID | Interp.SCRIPT_VERIFY_LOW_S | Interp.SCRIPT_VERIFY_NULLFAIL |
-  Interp.SCRIPT_VERIFY_DERSIG |
-  Interp.SCRIPT_VERIFY_MINIMALDATA | Interp.SCRIPT_VERIFY_NULLDUMMY |
-  Interp.SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS |
-  Interp.SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | Interp.SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | Interp.SCRIPT_VERIFY_CLEANSTACK;
-
+const DEFAULT_SIGHASH_TYPE = 65; // SIGHASH_ALL | SIGHASH_FORKID
 
 export const useContracts = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const { retrieveKeys, bsvAddress, ordAddress, verifyPassword } = useKeys();
+  const { bsvWasmInitialized } = useBsvWasm();
 
   /**
    * 
@@ -81,6 +72,8 @@ export const useContracts = () => {
     password: string
   ): Promise<{ sigResponses?: SignatureResponse[], error?: { message: string; cause?: any } }> => {
     try {
+      if (!bsvWasmInitialized) throw Error("bsv-wasm not initialized!");
+
       setIsProcessing(true);
       const isAuthenticated = await verifyPassword(password);
       if (!isAuthenticated) {
@@ -92,44 +85,39 @@ export const useContracts = () => {
         const addresses = address instanceof Array ? address : [address];
         return addresses.map(addr => {
           if (addr === bsvAddress) {
-            return bsv.PrivateKey.fromWIF(keys.walletWif);
+            return PrivateKey.from_wif(keys.walletWif!);
           }
           if (addr === ordAddress) {
-            return bsv.PrivateKey.fromWIF(keys.ordWif);
+            return PrivateKey.from_wif(keys.ordWif!);
           }
           throw new Error('unknown-address', { cause: addr });
         });
       }
 
-      const tx = new bsv.Transaction(request.txHex);
+      const tx = Transaction.from_hex(request.txHex);
       const sigResponses: SignatureResponse[] = request.sigRequests.flatMap(sigReq => {
 
-        if (!tx.inputs[sigReq.inputIndex]) {
+        if (!tx.get_input(sigReq.inputIndex)) {
           throw new Error('invalid-tx-input-index', { cause: sigReq.inputIndex });
         }
 
         const privkeys = getPrivKeys(sigReq.address);
 
-        return privkeys.map((privKey: any) => {
-          const addr = privKey.toAddress().toString();
-          const script = sigReq.scriptHex ? new bsv.Script(sigReq.scriptHex) : bsv.Script.buildPublicKeyHashOut(addr);
-          tx.inputs[sigReq.inputIndex].output = new bsv.Transaction.Output({
-            // TODO: support multiSig?
-            script: script,
-            satoshis: sigReq.satoshis
-          });
+        return privkeys.map((privKey: PrivateKey) => {
+          const addr = privKey.to_public_key().to_address();
+          const script = sigReq.scriptHex ? Script.from_hex(sigReq.scriptHex) : addr.get_locking_script();
+          tx.get_input(sigReq.inputIndex)!.set_satoshis(BigInt(sigReq.satoshis));
+          tx.get_input(sigReq.inputIndex)!.set_locking_script(script);
 
-          // Split to subscript if OP_CODESEPARATOR is being employed.
-          const subScript = sigReq.csIdx !== undefined ? script.subScript(sigReq.csIdx) : script;
+          script.remove_codeseparators();
+          // TODO: support multiple OP_CODESEPARATORs and get subScript according to `csIdx`.
+          const subScript = script;
 
-          const sig = bsv.Transaction.Sighash.sign(
-            tx, privKey, sigReq.sigHashType || DEFAULT_SIGHASH_TYPE, sigReq.inputIndex,
-            subScript, new bsv.crypto.BN(sigReq.satoshis), DEFAULT_FLAGS
-          ).toTxFormat().toString('hex');
+          const sig = tx.sign(privKey, sigReq.sigHashType || DEFAULT_SIGHASH_TYPE, sigReq.inputIndex, subScript, BigInt(sigReq.satoshis)).to_hex();
 
           return {
-            sig: sig as string,
-            publicKey: privKey.publicKey.toString(),
+            sig,
+            publicKey: privKey.to_public_key().toString(),
             inputIndex: sigReq.inputIndex,
             sigHashType: sigReq.sigHashType || DEFAULT_SIGHASH_TYPE,
             csIdx: sigReq.csIdx,

@@ -17,7 +17,8 @@ import { DefaultTheme, styled } from "styled-components";
 import { SignatureResponse, Web3GetSignaturesRequest, useContracts } from "../../hooks/useContracts";
 import { storage } from "../../utils/storage";
 import { useNavigate } from "react-router-dom";
-import * as bsv from "bsv";
+import { P2PKHAddress, Transaction } from "bsv-wasm-web";
+import { useBsvWasm } from "../../hooks/useBsvWasm";
 
 const TxInput = styled.div`
   border: 1px solid yellow;
@@ -87,7 +88,14 @@ const TxViewer = (props: { request: Web3GetSignaturesRequest }) => {
   const { theme } = useTheme();
   const [showDetail, setShowDetail] = useState(false);
   const { request } = props;
-  const tx = new bsv.Transaction(request.txHex);
+  const { bsvWasmInitialized } = useBsvWasm();
+  const [tx, setTx] = useState<Transaction | undefined>(undefined);
+
+  useEffect(() => {
+    if (bsvWasmInitialized) {
+      setTx(Transaction.from_hex(request.txHex));
+    }
+  }, [bsvWasmInitialized, request.txHex]);
 
   return (
     <TxContainer>
@@ -128,20 +136,27 @@ const TxViewer = (props: { request: Web3GetSignaturesRequest }) => {
             Outputs
           </Text>
           {
-            tx.outputs.map((output: any, idx: number) => {
-              const toAddr = output.script?.toAddress().toString();
-              return (
-                <TxOutput>
-                  <OutputContent
-                    idx={idx}
-                    tag={output.script?.isPublicKeyHashOut() ? 'P2PKH' : 'nonStandard'}
-                    addr={toAddr === 'false' ? 'Unknown Address' : toAddr}
-                    sats={output.satoshis}
-                    theme={theme}
-                  />
-                </TxOutput>
-              )
-            })
+            tx ?
+              [...Array(tx.get_noutputs()).keys()].map((idx: number) => {
+                const output = tx.get_output(idx);
+                const asm = output!.get_script_pub_key().to_asm_string();
+                const pubkeyHash = (/^OP_DUP OP_HASH160 ([0-9a-fA-F]{40}) OP_EQUALVERIFY OP_CHECKSIG$/.exec(asm) || [])[1];
+                const isP2PKH = !!pubkeyHash;
+                const toAddr = pubkeyHash ? P2PKHAddress.from_pubkey_hash(Uint8Array.from(Buffer.from(pubkeyHash, 'hex'))).to_string() : 'Unknown Address';
+
+                return (
+                  <TxOutput>
+                    <OutputContent
+                      idx={idx}
+                      tag={isP2PKH ? 'P2PKH' : 'nonStandard'}
+                      addr={toAddr}
+                      sats={Number(output!.get_satoshis())}
+                      theme={theme}
+                    />
+                  </TxOutput>
+                )
+              })
+              : <>Parsing Tx ...</>
           }
         </TxOutputsContainer>
       </Show>
@@ -171,7 +186,6 @@ export const GetSignaturesRequest = (props: GetSignaturesRequestProps) => {
   const { getSigsRequest, onSignature, popupId } = props;
   const [getSigsResponse, setGetSigsRespons] = useState<any>(undefined);
   const { isProcessing, setIsProcessing, getSignatures } = useContracts();
-
 
   useEffect(() => {
     setSelected("bsv");
@@ -232,7 +246,7 @@ export const GetSignaturesRequest = (props: GetSignaturesRequestProps) => {
     onSignature();
 
     chrome.runtime.sendMessage({
-      action: "getSignaturesResult",
+      action: "getSignaturesResponse",
       ...getSigsRes,
     });
 
@@ -243,7 +257,6 @@ export const GetSignaturesRequest = (props: GetSignaturesRequestProps) => {
 
   const rejectSigning = async (e: React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
     e.preventDefault();
-    console.log("rejectSigning");
     if (popupId) chrome.windows.remove(popupId);
     storage.remove("getSignaturesRequest");
   };
@@ -271,6 +284,7 @@ export const GetSignaturesRequest = (props: GetSignaturesRequestProps) => {
               theme={theme}
               type="primary"
               label="Sign the transaction"
+              isSubmit
               disabled={isProcessing}
             />
             <Button

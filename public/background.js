@@ -591,8 +591,6 @@ const processBroadcastResponse = (message) => {
   return true;
 };
 
-// HANDLE WINDOW CLOSE *****************************************
-
 const processGetSignaturesResponse = (message) => {
   if (!responseCallbackForGetSignaturesRequest) throw Error("Missing callback!");
   try {
@@ -616,6 +614,8 @@ const processGetSignaturesResponse = (message) => {
 
   return true;
 };
+
+// HANDLE WINDOW CLOSE *****************************************
 
 chrome.windows.onRemoved.addListener((closedWindowId) => {
   if (closedWindowId === popupWindowId) {
